@@ -18,6 +18,8 @@ export interface RoundOpts {
   systemPromptA: string
   systemPromptB: string
   lastAgentBContent: string | null
+  claudeSid?: string | null
+  codexSid?: string | null
   humanMessage?: string
   cwd?: string
   timeoutMs?: number
@@ -35,14 +37,17 @@ export async function executeRound(opts: RoundOpts): Promise<RoundResult> {
   // 2. AGENT A TURN
   let turnA: AgentTurn
   const promptA = wrapTurnPrompt(opts.lastAgentBContent, round, opts.humanMessage)
+  const sendOptsA = {
+    cwd: opts.cwd,
+    timeout_ms: opts.timeoutMs,
+    maxBudget: opts.maxBudgetPerTurn,
+    systemPrompt: opts.systemPromptA,
+  }
 
   try {
-    turnA = await opts.agentA.send(promptA, {
-      cwd: opts.cwd,
-      timeout_ms: opts.timeoutMs,
-      maxBudget: opts.maxBudgetPerTurn,
-      systemPrompt: opts.systemPromptA,
-    })
+    turnA = opts.claudeSid
+      ? await opts.agentA.resume(opts.claudeSid, promptA, sendOptsA)
+      : await opts.agentA.send(promptA, sendOptsA)
   } catch (err) {
     console.log(ducks.agentStatus('claude', `Failed: ${(err as Error).message}`))
     rollbackArtifact(db, sessionId, round, 'pre_round', artifactPath)
@@ -73,14 +78,17 @@ export async function executeRound(opts: RoundOpts): Promise<RoundResult> {
   // 3. AGENT B TURN
   let turnB: AgentTurn
   const promptB = wrapTurnPrompt(turnA.content, round)
+  const sendOptsB = {
+    cwd: opts.cwd,
+    timeout_ms: opts.timeoutMs,
+    maxBudget: opts.maxBudgetPerTurn,
+    systemPrompt: opts.systemPromptB,
+  }
 
   try {
-    turnB = await opts.agentB.send(promptB, {
-      cwd: opts.cwd,
-      timeout_ms: opts.timeoutMs,
-      maxBudget: opts.maxBudgetPerTurn,
-      systemPrompt: opts.systemPromptB,
-    })
+    turnB = opts.codexSid
+      ? await opts.agentB.resume(opts.codexSid, promptB, sendOptsB)
+      : await opts.agentB.send(promptB, sendOptsB)
   } catch (err) {
     console.log(ducks.agentStatus('codex', `Failed: ${(err as Error).message}`))
     rollbackArtifact(db, sessionId, round, 'post_agent_a', artifactPath)

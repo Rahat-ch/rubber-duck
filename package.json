@@ -1,6 +1,6 @@
 {
   "name": "rubberduck",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dual-agent AI orchestrator — Claude Code + Codex CLI working in tandem",
   "type": "module",
   "bin": {
