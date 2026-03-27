@@ -15,8 +15,12 @@ program
   .name('duck')
   .description('Rubber Duck — dual-agent AI orchestrator')
   .version('0.1.2')
-  .hook('preAction', () => {
-    console.log(BANNER)
+  .hook('preAction', (thisCommand) => {
+    // Only show banner for non-session commands (status, log, export)
+    const cmd = thisCommand.args?.[0]
+    if (['status', 'log', 'export'].includes(cmd as string)) {
+      console.log(BANNER)
+    }
   })
 
 program
@@ -29,6 +33,8 @@ program
   .option('--codex-model <model>', 'Override Codex model')
   .option('--layout <dir>', 'Tmux layout: horizontal | vertical', 'horizontal')
   .option('--no-tmux', 'Run without tmux')
+  .option('--internal', 'Internal: running inside tmux pane')
+  .option('--tmux-session <name>', 'Internal: tmux session name')
   .option('--plan-file <path>', 'Custom plan file path')
   .option('--budget <usd>', 'Max session budget in USD', '10')
   .option('-v, --verbose', 'Verbose output')
@@ -45,6 +51,8 @@ program
   .option('--claude-model <model>', 'Override Claude model')
   .option('--codex-model <model>', 'Override Codex model')
   .option('--budget <usd>', 'Max session budget in USD', '10')
+  .option('--internal', 'Internal: running inside tmux pane')
+  .option('--tmux-session <name>', 'Internal: tmux session name')
   .option('-v, --verbose', 'Verbose output')
   .action(async (path: string, opts: Record<string, string>) => {
     await runSession('review', path, opts)
@@ -60,6 +68,8 @@ program
   .option('--claude-model <model>', 'Override Claude model')
   .option('--codex-model <model>', 'Override Codex model')
   .option('--budget <usd>', 'Max session budget in USD', '10')
+  .option('--internal', 'Internal: running inside tmux pane')
+  .option('--tmux-session <name>', 'Internal: tmux session name')
   .option('-v, --verbose', 'Verbose output')
   .action(async (task: string, opts: Record<string, string>) => {
     await runSession('build', task, opts)
@@ -160,6 +170,8 @@ async function runSession(mode: SessionMode, taskOrPath: string, opts: Record<st
     config,
     stepByStep: Boolean(opts.stepByStep),
     noTmux: !opts.tmux,
+    _internal: Boolean(opts.internal),
+    _tmuxSessionName: opts.tmuxSession as string | undefined,
   })
 }
 

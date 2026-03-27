@@ -10,13 +10,14 @@ import { ClaudeAdapter } from '../adapters/claude.js'
 import { CodexAdapter } from '../adapters/codex.js'
 import { getSystemPrompt } from '../adapters/prompts.js'
 import { getDb, closeDb } from '../bus/db.js'
-import { createSession, updateSession } from '../bus/sessions.js'
+import { createSession, updateSession, getSession } from '../bus/sessions.js'
+import { getLastMessage } from '../bus/messages.js'
 import { getDbPath } from '../config.js'
 import { initPlanArtifact, initReviewArtifact } from '../artifact/manager.js'
 import { executeRound } from './round.js'
 import { shouldSummarize, summarizeAndRotate } from '../summarizer/summarizer.js'
 import { InterruptHandler } from '../interrupt/handler.js'
-import { isTmuxAvailable, createDuckSession, writeToPane, clearPane, killSession, attachToSession, setPaneTitle } from '../tmux/manager.js'
+import { isTmuxAvailable, isInsideTmux, launchInTmux, writeToPane, setPaneTitle, getPaneIds } from '../tmux/manager.js'
 import { BANNER, CONSENSUS_BANNER } from '../ui/ducks.js'
 import { printRoundSummary, printDiffSummary, promptUser } from '../ui/control.js'
 import chalk from 'chalk'
@@ -27,13 +28,40 @@ export interface OrchestratorOpts {
   config: RubberDuckConfig
   stepByStep?: boolean
   noTmux?: boolean
+  _internal?: boolean // set when running inside tmux pane
+  _tmuxSessionName?: string
 }
 
 export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
   const { mode, task, config } = opts
+  const useTmux = !opts.noTmux && isTmuxAvailable() && !opts._internal
+
+  // If tmux available and we're not already inside the tmux session: launch tmux and re-exec
+  if (useTmux) {
+    const sessionId = uuid().slice(0, 8)
+    const tmuxName = `duck-${sessionId}`
+
+    // Build the command to run inside the control pane
+    const args = process.argv.slice(1).filter(a => a !== '--no-tmux')
+    const cmd = `npx tsx ${args.map(a => `'${a}'`).join(' ')} --internal --tmux-session ${tmuxName}`
+
+    console.log(BANNER)
+    console.log(chalk.dim(`Launching tmux session: ${tmuxName}`))
+    console.log(chalk.dim(`Press Ctrl+\\ to interrupt agents\n`))
+
+    launchInTmux(tmuxName, config.tmux.layout, cmd)
+    // launchInTmux attaches and blocks until user detaches/exits
+    return
+  }
+
+  // Running inside tmux (--internal) or no-tmux mode
+  await runOrchestratorCore(opts)
+}
+
+async function runOrchestratorCore(opts: OrchestratorOpts): Promise<void> {
+  const { mode, task, config } = opts
   const sessionId = uuid()
   const db = getDb(getDbPath(config))
-  const useTmux = !opts.noTmux && isTmuxAvailable()
 
   const artifactPath = resolveArtifactPath(mode, task)
 
@@ -51,35 +79,13 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
     artifact_kind: mode,
   })
 
-  // Set up tmux if available
-  let tmuxSession: ReturnType<typeof createDuckSession> | null = null
-  if (useTmux) {
-    const sessionName = `duck-${sessionId.slice(0, 8)}`
-    tmuxSession = createDuckSession(sessionName, config.tmux.layout)
+  // Get tmux pane IDs if we're running inside a tmux session
+  const tmuxPanes = opts._tmuxSessionName ? getPaneIds(opts._tmuxSessionName) : null
 
-    // Show banner in control pane
-    writeToPane(tmuxSession.panes.control, '')
-    clearPane(tmuxSession.panes.claude)
-    clearPane(tmuxSession.panes.codex)
-
-    setPaneTitle(tmuxSession.panes.claude, 'Claude (Agent A) — waiting')
-    setPaneTitle(tmuxSession.panes.codex, 'Codex (Agent B) — waiting')
-    setPaneTitle(tmuxSession.panes.control, `Duck Control — ${mode} mode`)
-
-    // Write session info to control pane
-    writeToPane(tmuxSession.panes.control, `Session: ${sessionId.slice(0, 8)}`)
-    writeToPane(tmuxSession.panes.control, `Mode: ${mode} | Rounds: ${config.session.maxRounds} | Budget: $${config.session.maxBudgetTotal}`)
-    writeToPane(tmuxSession.panes.control, `Artifact: ${artifactPath}`)
-    writeToPane(tmuxSession.panes.control, '')
-  }
-
-  console.log(chalk.dim(`Session: ${sessionId}`))
-  console.log(chalk.dim(`Artifact: ${artifactPath}`))
-  if (useTmux && tmuxSession) {
-    console.log(chalk.dim(`Tmux session: ${tmuxSession.name}`))
-    console.log(chalk.dim(`Attach with: tmux attach -t ${tmuxSession.name}`))
-  }
-  console.log()
+  console.log(BANNER)
+  console.log(chalk.dim(`Session: ${sessionId.slice(0, 8)}`))
+  console.log(chalk.dim(`Mode: ${mode} | Max rounds: ${config.session.maxRounds}`))
+  console.log(chalk.dim(`Artifact: ${artifactPath}\n`))
 
   const agentA = new ClaudeAdapter()
   const agentB = new CodexAdapter()
@@ -104,9 +110,7 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
 
   for (let round = 1; round <= config.session.maxRounds; round++) {
     if (totalCost >= config.session.maxBudgetTotal) {
-      const msg = `Budget limit reached ($${totalCost.toFixed(2)} / $${config.session.maxBudgetTotal})`
-      console.log(chalk.red(`\n${msg}`))
-      if (tmuxSession) writeToPane(tmuxSession.panes.control, msg)
+      console.log(chalk.red(`\nBudget limit reached ($${totalCost.toFixed(2)} / $${config.session.maxBudgetTotal})`))
       updateSession(db, sessionId, { status: 'paused', rounds: round - 1, total_cost_usd: totalCost })
       break
     }
@@ -124,11 +128,10 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
       }
     }
 
-    // Update tmux pane titles for active round
-    if (tmuxSession) {
-      setPaneTitle(tmuxSession.panes.claude, `Claude (Agent A) — Round ${round}`)
-      setPaneTitle(tmuxSession.panes.codex, `Codex (Agent B) — Round ${round}`)
-      writeToPane(tmuxSession.panes.control, `--- Round ${round} ---`)
+    // Update tmux pane titles
+    if (tmuxPanes) {
+      setPaneTitle(tmuxPanes.claude, `Claude (Agent A) — Round ${round}`)
+      setPaneTitle(tmuxPanes.codex, `Codex (Agent B) — waiting`)
     }
 
     let result: RoundResult
@@ -150,12 +153,10 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
         cwd: process.cwd(),
         timeoutMs: config.session.timeoutPerTurn_ms,
         maxBudgetPerTurn: config.claude.maxBudgetPerTurn,
-        tmuxPanes: tmuxSession?.panes,
+        tmuxPanes: tmuxPanes ?? undefined,
       })
     } catch (err) {
-      const msg = `Round ${round} failed: ${(err as Error).message}`
-      console.error(chalk.red(`\n${msg}`))
-      if (tmuxSession) writeToPane(tmuxSession.panes.control, msg)
+      console.error(chalk.red(`\nRound ${round} failed: ${(err as Error).message}`))
       updateSession(db, sessionId, { status: 'failed', rounds: round, total_cost_usd: totalCost })
       break
     }
@@ -172,17 +173,12 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
       codex_sid: codexSid || undefined,
     })
 
-    // Show round cost summary
     printRoundSummary(round, result.agent_a.cost_usd, result.agent_b.cost_usd, totalCost, config.session.maxBudgetTotal)
 
-    // For build mode: show git diff after each round
     if (mode === 'build' && artifactPath) {
       try {
         const diffStat = execSync('git diff --stat', { cwd: artifactPath, encoding: 'utf-8' })
-        if (diffStat.trim()) {
-          printDiffSummary(diffStat)
-          if (tmuxSession) writeToPane(tmuxSession.panes.control, diffStat)
-        }
+        if (diffStat.trim()) printDiffSummary(diffStat)
       } catch {}
     }
 
@@ -193,23 +189,18 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
       console.log(chalk.dim(`  Total cost: $${totalCost.toFixed(2)}`))
       console.log(chalk.dim(`  Artifact: ${artifactPath}`))
 
-      if (tmuxSession) {
-        writeToPane(tmuxSession.panes.control, `Consensus reached in ${round} rounds! Cost: $${totalCost.toFixed(2)}`)
-        setPaneTitle(tmuxSession.panes.claude, 'Claude (Agent A) — done')
-        setPaneTitle(tmuxSession.panes.codex, 'Codex (Agent B) — done')
+      if (tmuxPanes) {
+        setPaneTitle(tmuxPanes.claude, 'Claude — done')
+        setPaneTitle(tmuxPanes.codex, 'Codex — done')
       }
 
-      // Plan->build transition prompt
       if (mode === 'plan') {
         const answer = await promptUser('[b]uild from this plan? [q]uit?')
         if (answer.toLowerCase() === 'b' || answer.toLowerCase() === 'build') {
           console.log(chalk.dim('\nTransitioning to build mode...'))
-          if (tmuxSession) {
-            killSession(tmuxSession.name)
-          }
           interrupt.destroy()
           closeDb()
-          await runOrchestrator({
+          await runOrchestratorCore({
             ...opts,
             mode: 'build',
             task: `Build according to the plan in ${artifactPath}: ${task}`,
@@ -220,10 +211,8 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
       break
     }
 
-    // Summarize if needed
     if (shouldSummarize(round, config.session.summarizeEvery)) {
       console.log(chalk.dim('\nSummarizing conversation...'))
-      if (tmuxSession) writeToPane(tmuxSession.panes.control, 'Summarizing conversation...')
       try {
         await summarizeAndRotate(db, sessionId, round, config.consensus.model)
         claudeSid = null
@@ -240,6 +229,135 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
     console.log(chalk.yellow(`\nMax rounds (${config.session.maxRounds}) reached without consensus.`))
     console.log(chalk.dim(`Total cost: $${totalCost.toFixed(2)}`))
     console.log(chalk.dim(`Resume with: duck resume ${sessionId.slice(0, 8)}`))
+    updateSession(db, sessionId, { status: 'paused', total_cost_usd: totalCost })
+  }
+
+  interrupt.destroy()
+  closeDb()
+}
+
+export interface ResumeOpts {
+  sessionId: string
+  config: RubberDuckConfig
+  noTmux?: boolean
+}
+
+export async function resumeOrchestrator(opts: ResumeOpts): Promise<void> {
+  const { sessionId, config } = opts
+  const db = getDb(getDbPath(config))
+  const session = getSession(db, sessionId)
+
+  if (!session) {
+    console.error(chalk.red(`Session not found: ${sessionId}`))
+    closeDb()
+    return
+  }
+
+  if (session.status === 'converged') {
+    console.log(chalk.green('Session already converged.'))
+    closeDb()
+    return
+  }
+
+  const lastB = getLastMessage(db, sessionId, 'codex')
+  updateSession(db, sessionId, { status: 'active' })
+
+  const artifactPath = session.artifact_path ?? resolveArtifactPath(session.mode, session.task)
+
+  console.log(BANNER)
+  console.log(chalk.dim(`Resuming session: ${session.id.slice(0, 8)}`))
+  console.log(chalk.dim(`Mode: ${session.mode} | Round: ${session.rounds + 1}/${session.max_rounds}\n`))
+
+  const agentA = new ClaudeAdapter()
+  const agentB = new CodexAdapter()
+
+  const promptVars = {
+    artifact_path: artifactPath,
+    review_target_path: session.mode === 'review' ? session.task : undefined,
+    task: session.task,
+    step_by_step: session.step_by_step,
+  }
+  const systemPromptA = writeSystemPromptFile(getSystemPrompt(session.mode, 'a', promptVars), 'claude')
+  const systemPromptB = writeSystemPromptFile(getSystemPrompt(session.mode, 'b', promptVars), 'codex')
+
+  const interrupt = new InterruptHandler(config.interrupt.hotkey)
+  interrupt.registerAgents(agentA, agentB)
+
+  let totalCost = session.total_cost_usd
+  let claudeSid = session.claude_sid
+  let codexSid = session.codex_sid
+  let currentLastB = lastB?.content ?? null
+  let converged = false
+  const startRound = session.rounds + 1
+
+  for (let round = startRound; round <= session.max_rounds; round++) {
+    if (totalCost >= config.session.maxBudgetTotal) {
+      console.log(chalk.red(`\nBudget limit reached ($${totalCost.toFixed(2)})`))
+      updateSession(db, sessionId, { status: 'paused', rounds: round - 1, total_cost_usd: totalCost })
+      break
+    }
+
+    let result: RoundResult
+    try {
+      result = await executeRound({
+        db,
+        sessionId,
+        round,
+        mode: session.mode,
+        artifactPath,
+        agentA,
+        agentB,
+        systemPromptA,
+        systemPromptB,
+        lastAgentBContent: currentLastB,
+        claudeSid,
+        codexSid,
+        cwd: process.cwd(),
+        timeoutMs: config.session.timeoutPerTurn_ms,
+        maxBudgetPerTurn: config.claude.maxBudgetPerTurn,
+      })
+    } catch (err) {
+      console.error(chalk.red(`\nRound ${round} failed: ${(err as Error).message}`))
+      updateSession(db, sessionId, { status: 'failed', rounds: round, total_cost_usd: totalCost })
+      break
+    }
+
+    totalCost += result.cost_usd
+    currentLastB = result.agent_b.content
+    claudeSid = result.agent_a.session_id || claudeSid
+    codexSid = result.agent_b.session_id || codexSid
+
+    updateSession(db, sessionId, {
+      rounds: round,
+      total_cost_usd: totalCost,
+      claude_sid: claudeSid || undefined,
+      codex_sid: codexSid || undefined,
+    })
+
+    printRoundSummary(round, result.agent_a.cost_usd, result.agent_b.cost_usd, totalCost, config.session.maxBudgetTotal)
+
+    if (result.consensus.reached) {
+      converged = true
+      console.log(CONSENSUS_BANNER)
+      console.log(chalk.green(`  Consensus reached in round ${round}!`))
+      console.log(chalk.dim(`  Total cost: $${totalCost.toFixed(2)}`))
+      updateSession(db, sessionId, { status: 'converged', total_cost_usd: totalCost })
+      break
+    }
+
+    if (shouldSummarize(round, config.session.summarizeEvery)) {
+      try {
+        await summarizeAndRotate(db, sessionId, round, config.consensus.model)
+        claudeSid = null
+        codexSid = null
+      } catch {}
+    }
+
+    console.log()
+  }
+
+  if (!converged) {
+    console.log(chalk.yellow(`\nMax rounds reached. Resume with: duck resume ${sessionId.slice(0, 8)}`))
     updateSession(db, sessionId, { status: 'paused', total_cost_usd: totalCost })
   }
 

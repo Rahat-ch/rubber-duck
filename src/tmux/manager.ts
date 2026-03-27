@@ -1,5 +1,4 @@
-import { execSync, spawn } from 'node:child_process'
-import type { ChildProcess } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 
 export interface TmuxSession {
   name: string
@@ -19,56 +18,58 @@ export function isInsideTmux(): boolean {
   return !!process.env.TMUX
 }
 
-export function createDuckSession(sessionName: string, layout: 'horizontal' | 'vertical'): TmuxSession {
-  // Create session — this gives us one pane
-  execSync(`tmux new-session -d -s "${sessionName}" -x 220 -y 60`, { stdio: 'pipe' })
+export function launchInTmux(sessionName: string, layout: 'horizontal' | 'vertical', controlCommand: string): void {
+  // Create session running the orchestrator command in the first pane (control)
+  execSync(`tmux new-session -d -s "${sessionName}" -x 220 -y 60 "${controlCommand}"`, { stdio: 'pipe' })
 
-  // Get the initial pane ID
   const initialPanes = listPanes(sessionName)
-  const firstPane = initialPanes[0]
+  const controlPane = initialPanes[0]
 
   if (layout === 'horizontal') {
-    // Split right for codex pane
-    execSync(`tmux split-window -h -t "${firstPane}"`, { stdio: 'pipe' })
-    // Split bottom of left (first) pane for control
-    execSync(`tmux split-window -v -t "${firstPane}" -l 12`, { stdio: 'pipe' })
+    // Split right — this will be the claude pane (top-right)
+    execSync(`tmux split-window -h -t "${controlPane}" "echo 'Claude (Agent A) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    const afterFirst = listPanes(sessionName)
+    const claudePane = afterFirst[1] // new pane is to the right
+
+    // Split the right pane vertically — codex pane (bottom-right)
+    execSync(`tmux split-window -v -t "${claudePane}" "echo 'Codex (Agent B) — waiting for turn...'; cat"`, { stdio: 'pipe' })
   } else {
-    // Split bottom for codex pane
-    execSync(`tmux split-window -v -t "${firstPane}"`, { stdio: 'pipe' })
-    // Split bottom again for control
-    const midPanes = listPanes(sessionName)
-    execSync(`tmux split-window -v -t "${midPanes[1]}" -l 12`, { stdio: 'pipe' })
+    // Split bottom for claude
+    execSync(`tmux split-window -v -t "${controlPane}" "echo 'Claude (Agent A) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    const afterFirst = listPanes(sessionName)
+    // Split again for codex
+    execSync(`tmux split-window -v -t "${afterFirst[1]}" "echo 'Codex (Agent B) — waiting for turn...'; cat"`, { stdio: 'pipe' })
   }
 
-  // Get final pane IDs after all splits
+  // Get final pane layout
   const panes = listPanes(sessionName)
-  // horizontal layout: split-h creates pane to the right, split-v on first creates pane below first
-  // panes[0] = top-left (claude), panes[1] = bottom-left (control), panes[2] = right (codex)
-  const claudePane = panes[0]
-  const codexPane = layout === 'horizontal' ? panes[2] : panes[1]
-  const controlPane = layout === 'horizontal' ? panes[1] : panes[2]
+  // Control is always pane 0 (where the orchestrator runs)
+  setPaneTitle(panes[0], 'Duck Control')
+  setPaneTitle(panes[1], 'Claude (Agent A)')
+  setPaneTitle(panes[2] ?? panes[1], 'Codex (Agent B)')
 
-  // Set pane titles using actual pane IDs
-  setPaneTitle(claudePane, 'Claude (Agent A)')
-  setPaneTitle(codexPane, 'Codex (Agent B)')
-  setPaneTitle(controlPane, 'Duck Control')
+  // Focus control pane but make agent panes visible
+  execSync(`tmux select-pane -t "${panes[0]}"`, { stdio: 'pipe' })
 
-  return {
-    name: sessionName,
-    panes: {
-      claude: claudePane,
-      codex: codexPane,
-      control: controlPane,
-    },
-  }
+  // Attach — this replaces the current process
+  spawnSync('tmux', ['attach-session', '-t', sessionName], { stdio: 'inherit' })
 }
 
 export function writeToPane(paneId: string, text: string): void {
-  // Use display-message or send raw text by echoing
-  for (const line of text.split('\n')) {
-    const escaped = line.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')
+  // Write text to a pane by piping to its tty
+  try {
+    const tty = execSync(`tmux display-message -t "${paneId}" -p "#{pane_tty}"`, { encoding: 'utf-8' }).trim()
+    if (tty) {
+      // Write directly to the pane's tty
+      for (const line of text.split('\n')) {
+        execSync(`echo ${JSON.stringify(line)} > "${tty}"`, { stdio: 'pipe' })
+      }
+    }
+  } catch {
+    // Fallback: use send-keys
     try {
-      execSync(`tmux send-keys -t "${paneId}" "echo \\"${escaped}\\"" Enter`, { stdio: 'pipe' })
+      const safe = text.replace(/\n/g, ' ').slice(0, 500)
+      execSync(`tmux send-keys -t "${paneId}" "" Enter`, { stdio: 'pipe' })
     } catch {}
   }
 }
@@ -79,36 +80,10 @@ export function clearPane(paneId: string): void {
   } catch {}
 }
 
-export function streamToPane(paneId: string, data: string): void {
-  // Write raw data to pane using display-message for single lines
-  // For streaming, we pipe directly
-  const lines = data.split('\n')
-  for (const line of lines) {
-    if (!line) continue
-    const escaped = line.replace(/'/g, "'\\''")
-    try {
-      execSync(`tmux display-message -t "${paneId}" -p '${escaped}'`, { stdio: 'pipe' })
-    } catch {
-      // Fallback: use send-keys with echo
-      writeToPane(paneId, line)
-    }
-  }
-}
-
 export function setPaneTitle(paneId: string, title: string): void {
   try {
     execSync(`tmux select-pane -t "${paneId}" -T "${title}"`, { stdio: 'pipe' })
   } catch {}
-}
-
-export function attachToSession(sessionName: string): void {
-  // Replace current process with tmux attach
-  const child = spawn('tmux', ['attach-session', '-t', sessionName], {
-    stdio: 'inherit',
-  })
-  child.on('exit', (code) => {
-    process.exit(code ?? 0)
-  })
 }
 
 export function killSession(sessionName: string): void {
@@ -126,8 +101,8 @@ function listPanes(sessionName: string): string[] {
   }
 }
 
-export function runInPane(paneId: string, command: string): void {
-  try {
-    execSync(`tmux send-keys -t "${paneId}" "${command}" Enter`, { stdio: 'pipe' })
-  } catch {}
+export function getPaneIds(sessionName: string): { claude: string; codex: string; control: string } | null {
+  const panes = listPanes(sessionName)
+  if (panes.length < 3) return null
+  return { control: panes[0], claude: panes[1], codex: panes[2] }
 }
