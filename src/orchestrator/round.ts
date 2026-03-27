@@ -6,6 +6,7 @@ import { checkConsensus } from '../consensus/detector.js'
 import { syntheticRequestChanges } from '../consensus/parser.js'
 import { wrapTurnPrompt } from '../adapters/prompts.js'
 import * as ducks from '../ui/ducks.js'
+import { setPaneTitle } from '../tmux/manager.js'
 
 export interface RoundOpts {
   db: Database.Database
@@ -24,6 +25,7 @@ export interface RoundOpts {
   cwd?: string
   timeoutMs?: number
   maxBudgetPerTurn?: number
+  tmuxPanes?: { claude: string; codex: string; control: string }
 }
 
 export async function executeRound(opts: RoundOpts): Promise<RoundResult> {
@@ -75,6 +77,11 @@ export async function executeRound(opts: RoundOpts): Promise<RoundResult> {
 
   console.log(ducks.agentStatus('claude', structuredA.summary || 'Completed turn', turnA.cost_usd, turnA.duration_ms))
 
+  if (opts.tmuxPanes) {
+    setPaneTitle(opts.tmuxPanes.claude, `Claude — ${structuredA.summary?.slice(0, 40) || 'done'}`)
+    setPaneTitle(opts.tmuxPanes.codex, `Codex (Agent B) — thinking...`)
+  }
+
   // 3. AGENT B TURN
   let turnB: AgentTurn
   const promptB = wrapTurnPrompt(turnA.content, round)
@@ -123,6 +130,10 @@ export async function executeRound(opts: RoundOpts): Promise<RoundResult> {
   })
 
   console.log(ducks.agentStatus('codex', structuredB.summary || 'Completed turn', turnB.cost_usd, turnB.duration_ms))
+
+  if (opts.tmuxPanes) {
+    setPaneTitle(opts.tmuxPanes.codex, `Codex — ${structuredB.summary?.slice(0, 40) || 'done'}`)
+  }
 
   // 4. POST-ROUND: consensus check
   const consensus = checkConsensus(structuredA, structuredB, mode, artifactPath)
