@@ -6,7 +6,7 @@ const orange = chalk.hex('#FFA500')
 export const BANNER = `
 ${yellow('    __')}
 ${yellow('  >')}${orange('(o )')}${yellow('___')}
-${yellow('   ( ._> /')}    ${chalk.bold('Rubber Duck')} v0.1.0
+${yellow('   ( ._> /')}    ${chalk.bold('Rubber Duck')} v0.1.1
 ${yellow("    `---'")}     Two agents. One plan.
 `
 

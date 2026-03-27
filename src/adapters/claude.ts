@@ -28,7 +28,7 @@ export class ClaudeAdapter extends BaseAdapter {
     }
 
     if (opts?.systemPrompt) {
-      args.push('--system-prompt', opts.systemPrompt)
+      args.push('--append-system-prompt-file', opts.systemPrompt)
     }
 
     // No positional prompt arg — pipe via stdin to avoid arg parsing issues

@@ -32,19 +32,27 @@ export class CodexAdapter extends BaseAdapter {
 
     args.push('--json', '--full-auto', '--skip-git-repo-check')
 
-    if (opts?.systemPrompt) {
-      args.push('--config', `instructions=${opts.systemPrompt}`)
-    }
-
-    // Pass prompt via stdin to avoid arg parsing issues with long/special-char prompts
+    // Pass prompt via stdin to avoid arg parsing issues
     args.push('-')
+
+    // Prepend system prompt to the input since Codex doesn't support file-based instructions well
+    let input = prompt
+    if (opts?.systemPrompt) {
+      const { readFileSync } = await import('node:fs')
+      try {
+        const sysContent = readFileSync(opts.systemPrompt, 'utf-8')
+        input = `${sysContent}\n\n---\n\n${prompt}`
+      } catch {
+        input = prompt
+      }
+    }
 
     const start = Date.now()
     this.process = execa('codex', args, {
       cwd: opts?.cwd,
       timeout: opts?.timeout_ms ?? 120_000,
       reject: false,
-      input: prompt,
+      input,
     })
 
     const result = await this.process
