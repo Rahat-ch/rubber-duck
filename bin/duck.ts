@@ -14,7 +14,7 @@ const program = new Command()
 program
   .name('duck')
   .description('Rubber Duck — dual-agent AI orchestrator')
-  .version('0.1.1')
+  .version('0.1.2')
   .hook('preAction', () => {
     console.log(BANNER)
   })
