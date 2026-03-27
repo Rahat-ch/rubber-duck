@@ -10,7 +10,8 @@ import { ClaudeAdapter } from '../adapters/claude.js'
 import { CodexAdapter } from '../adapters/codex.js'
 import { getSystemPrompt } from '../adapters/prompts.js'
 import { getDb, closeDb } from '../bus/db.js'
-import { createSession, updateSession } from '../bus/sessions.js'
+import { createSession, updateSession, getSession } from '../bus/sessions.js'
+import { getLastMessage } from '../bus/messages.js'
 import { getDbPath } from '../config.js'
 import { initPlanArtifact, initReviewArtifact } from '../artifact/manager.js'
 import { executeRound } from './round.js'
@@ -240,6 +241,152 @@ export async function runOrchestrator(opts: OrchestratorOpts): Promise<void> {
     console.log(chalk.yellow(`\nMax rounds (${config.session.maxRounds}) reached without consensus.`))
     console.log(chalk.dim(`Total cost: $${totalCost.toFixed(2)}`))
     console.log(chalk.dim(`Resume with: duck resume ${sessionId.slice(0, 8)}`))
+    updateSession(db, sessionId, { status: 'paused', total_cost_usd: totalCost })
+  }
+
+  interrupt.destroy()
+  closeDb()
+}
+
+export interface ResumeOpts {
+  sessionId: string
+  config: RubberDuckConfig
+  noTmux?: boolean
+}
+
+export async function resumeOrchestrator(opts: ResumeOpts): Promise<void> {
+  const { sessionId, config } = opts
+  const db = getDb(getDbPath(config))
+  const session = getSession(db, sessionId)
+
+  if (!session) {
+    console.error(chalk.red(`Session not found: ${sessionId}`))
+    closeDb()
+    return
+  }
+
+  if (session.status === 'converged') {
+    console.log(chalk.green(`Session already converged.`))
+    closeDb()
+    return
+  }
+
+  console.log(chalk.dim(`Resuming session: ${session.id}`))
+  console.log(chalk.dim(`Mode: ${session.mode} | Round: ${session.rounds}/${session.max_rounds}`))
+  console.log(chalk.dim(`Artifact: ${session.artifact_path}`))
+  console.log()
+
+  // Get last agent B message for context continuity
+  const lastB = getLastMessage(db, sessionId, 'codex')
+  const lastAgentBContent = lastB?.content ?? null
+
+  updateSession(db, sessionId, { status: 'active' })
+
+  const artifactPath = session.artifact_path ?? resolveArtifactPath(session.mode, session.task)
+  const useTmux = !opts.noTmux && isTmuxAvailable()
+
+  const agentA = new ClaudeAdapter()
+  const agentB = new CodexAdapter()
+
+  const promptVars = {
+    artifact_path: artifactPath,
+    review_target_path: session.mode === 'review' ? session.task : undefined,
+    task: session.task,
+    step_by_step: session.step_by_step,
+  }
+  const systemPromptA = writeSystemPromptFile(getSystemPrompt(session.mode, 'a', promptVars), 'claude')
+  const systemPromptB = writeSystemPromptFile(getSystemPrompt(session.mode, 'b', promptVars), 'codex')
+
+  const interrupt = new InterruptHandler(config.interrupt.hotkey)
+  interrupt.registerAgents(agentA, agentB)
+
+  let tmuxSession: ReturnType<typeof createDuckSession> | null = null
+  if (useTmux) {
+    const tmuxName = `duck-${sessionId.slice(0, 8)}`
+    tmuxSession = createDuckSession(tmuxName, config.tmux.layout)
+    writeToPane(tmuxSession.panes.control, `Resumed session ${sessionId.slice(0, 8)} from round ${session.rounds + 1}`)
+  }
+
+  let totalCost = session.total_cost_usd
+  let claudeSid = session.claude_sid
+  let codexSid = session.codex_sid
+  let currentLastB = lastAgentBContent
+  let converged = false
+  const startRound = session.rounds + 1
+
+  for (let round = startRound; round <= session.max_rounds; round++) {
+    if (totalCost >= config.session.maxBudgetTotal) {
+      console.log(chalk.red(`\nBudget limit reached ($${totalCost.toFixed(2)})`))
+      updateSession(db, sessionId, { status: 'paused', rounds: round - 1, total_cost_usd: totalCost })
+      break
+    }
+
+    if (tmuxSession) {
+      writeToPane(tmuxSession.panes.control, `--- Round ${round} ---`)
+    }
+
+    let result: RoundResult
+    try {
+      result = await executeRound({
+        db,
+        sessionId,
+        round,
+        mode: session.mode,
+        artifactPath,
+        agentA,
+        agentB,
+        systemPromptA,
+        systemPromptB,
+        lastAgentBContent: currentLastB,
+        claudeSid,
+        codexSid,
+        cwd: process.cwd(),
+        timeoutMs: config.session.timeoutPerTurn_ms,
+        maxBudgetPerTurn: config.claude.maxBudgetPerTurn,
+        tmuxPanes: tmuxSession?.panes,
+      })
+    } catch (err) {
+      console.error(chalk.red(`\nRound ${round} failed: ${(err as Error).message}`))
+      updateSession(db, sessionId, { status: 'failed', rounds: round, total_cost_usd: totalCost })
+      break
+    }
+
+    totalCost += result.cost_usd
+    currentLastB = result.agent_b.content
+    claudeSid = result.agent_a.session_id || claudeSid
+    codexSid = result.agent_b.session_id || codexSid
+
+    updateSession(db, sessionId, {
+      rounds: round,
+      total_cost_usd: totalCost,
+      claude_sid: claudeSid || undefined,
+      codex_sid: codexSid || undefined,
+    })
+
+    printRoundSummary(round, result.agent_a.cost_usd, result.agent_b.cost_usd, totalCost, config.session.maxBudgetTotal)
+
+    if (result.consensus.reached) {
+      converged = true
+      console.log(CONSENSUS_BANNER)
+      console.log(chalk.green(`  Consensus reached in round ${round}!`))
+      console.log(chalk.dim(`  Total cost: $${totalCost.toFixed(2)}`))
+      updateSession(db, sessionId, { status: 'converged', total_cost_usd: totalCost })
+      break
+    }
+
+    if (shouldSummarize(round, config.session.summarizeEvery)) {
+      try {
+        await summarizeAndRotate(db, sessionId, round, config.consensus.model)
+        claudeSid = null
+        codexSid = null
+      } catch {}
+    }
+
+    console.log()
+  }
+
+  if (!converged) {
+    console.log(chalk.yellow(`\nMax rounds reached. Resume with: duck resume ${sessionId.slice(0, 8)}`))
     updateSession(db, sessionId, { status: 'paused', total_cost_usd: totalCost })
   }
 

@@ -2,7 +2,7 @@ import { Command } from 'commander'
 import { writeFileSync } from 'node:fs'
 import { loadConfig, getDbPath } from '../src/config.js'
 import { BANNER } from '../src/ui/ducks.js'
-import { runOrchestrator } from '../src/orchestrator/orchestrator.js'
+import { runOrchestrator, resumeOrchestrator } from '../src/orchestrator/orchestrator.js'
 import { getDb, closeDb } from '../src/bus/db.js'
 import { listSessions, getSession } from '../src/bus/sessions.js'
 import { getMessages } from '../src/bus/messages.js'
@@ -14,7 +14,7 @@ const program = new Command()
 program
   .name('duck')
   .description('Rubber Duck — dual-agent AI orchestrator')
-  .version('0.1.2')
+  .version('0.1.3')
   .hook('preAction', () => {
     console.log(BANNER)
   })
@@ -69,7 +69,8 @@ program
   .command('resume')
   .description('Resume a paused/interrupted session')
   .argument('<id>', 'Session ID')
-  .action(async (id: string) => {
+  .option('--no-tmux', 'Run without tmux')
+  .action(async (id: string, opts: Record<string, unknown>) => {
     const config = loadConfig()
     const db = getDb(getDbPath(config))
     const session = getSession(db, id) ?? getSession(db, findSessionByPrefix(db, id))
@@ -77,14 +78,12 @@ program
       console.error(`Session not found: ${id}`)
       process.exit(1)
     }
-    console.log(`Resuming session ${session.id} (round ${session.rounds + 1})...`)
-    await runOrchestrator({
-      mode: session.mode,
-      task: session.task,
-      config,
-      stepByStep: session.step_by_step,
-    })
     closeDb()
+    await resumeOrchestrator({
+      sessionId: session.id,
+      config,
+      noTmux: !opts.tmux,
+    })
   })
 
 program
