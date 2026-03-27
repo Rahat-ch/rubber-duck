@@ -90,6 +90,11 @@ async function runOrchestratorCore(opts: OrchestratorOpts): Promise<void> {
   const agentA = new ClaudeAdapter()
   const agentB = new CodexAdapter()
 
+  if (tmuxPanes) {
+    agentA.setTmuxPane(tmuxPanes.claude)
+    agentB.setTmuxPane(tmuxPanes.codex)
+  }
+
   const promptVars = {
     artifact_path: artifactPath,
     review_target_path: mode === 'review' ? task : undefined,

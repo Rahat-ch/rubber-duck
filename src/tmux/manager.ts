@@ -26,19 +26,17 @@ export function launchInTmux(sessionName: string, layout: 'horizontal' | 'vertic
   const controlPane = initialPanes[0]
 
   if (layout === 'horizontal') {
-    // Split right — this will be the claude pane (top-right)
-    execSync(`tmux split-window -h -t "${controlPane}" "echo 'Claude (Agent A) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    // Split right — shell for claude commands
+    execSync(`tmux split-window -h -t "${controlPane}"`, { stdio: 'pipe' })
     const afterFirst = listPanes(sessionName)
-    const claudePane = afterFirst[1] // new pane is to the right
+    const claudePane = afterFirst[1]
 
-    // Split the right pane vertically — codex pane (bottom-right)
-    execSync(`tmux split-window -v -t "${claudePane}" "echo 'Codex (Agent B) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    // Split the right pane vertically — shell for codex commands
+    execSync(`tmux split-window -v -t "${claudePane}"`, { stdio: 'pipe' })
   } else {
-    // Split bottom for claude
-    execSync(`tmux split-window -v -t "${controlPane}" "echo 'Claude (Agent A) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    execSync(`tmux split-window -v -t "${controlPane}"`, { stdio: 'pipe' })
     const afterFirst = listPanes(sessionName)
-    // Split again for codex
-    execSync(`tmux split-window -v -t "${afterFirst[1]}" "echo 'Codex (Agent B) — waiting for turn...'; cat"`, { stdio: 'pipe' })
+    execSync(`tmux split-window -v -t "${afterFirst[1]}"`, { stdio: 'pipe' })
   }
 
   // Get final pane layout
@@ -56,20 +54,15 @@ export function launchInTmux(sessionName: string, layout: 'horizontal' | 'vertic
 }
 
 export function writeToPane(paneId: string, text: string): void {
-  // Write text to a pane by piping to its tty
-  try {
-    const tty = execSync(`tmux display-message -t "${paneId}" -p "#{pane_tty}"`, { encoding: 'utf-8' }).trim()
-    if (tty) {
-      // Write directly to the pane's tty
-      for (const line of text.split('\n')) {
-        execSync(`echo ${JSON.stringify(line)} > "${tty}"`, { stdio: 'pipe' })
-      }
-    }
-  } catch {
-    // Fallback: use send-keys
+  // Strip ANSI escape codes for clean pane output
+  const clean = text.replace(/\u001b\[[0-9;]*m/g, '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+
+  for (const line of clean.split('\n')) {
+    if (!line.trim()) continue
+    // Use send-keys with literal flag to avoid interpretation
     try {
-      const safe = text.replace(/\n/g, ' ').slice(0, 500)
-      execSync(`tmux send-keys -t "${paneId}" "" Enter`, { stdio: 'pipe' })
+      execSync(`tmux send-keys -t "${paneId}" -l ${JSON.stringify(line)}`, { stdio: 'pipe' })
+      execSync(`tmux send-keys -t "${paneId}" Enter`, { stdio: 'pipe' })
     } catch {}
   }
 }
