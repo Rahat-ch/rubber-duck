@@ -1,0 +1,9 @@
+{
+  "result": "I've reviewed the plan and made some improvements.\n\nHere are my changes:\n1. Added error handling section\n2. Clarified the API design\n\n```json\n{\n  \"decision\": \"request_changes\",\n  \"blocking_issues\": [\"Missing authentication strategy\"],\n  \"artifact_hash\": \"abc123def456\",\n  \"touched_files\": [\"plan.md\"],\n  \"summary\": \"Added error handling, flagged missing auth strategy\"\n}\n```",
+  "session_id": "sess_claude_001",
+  "total_cost_usd": 0.12,
+  "usage": {
+    "input_tokens": 1500,
+    "output_tokens": 350
+  }
+}

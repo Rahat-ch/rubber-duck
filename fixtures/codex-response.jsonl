@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"thread_codex_001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"agent_message"}}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I agree with the proposed changes. The plan looks solid.\n\n```json\n{\n  \"decision\": \"approve\",\n  \"blocking_issues\": [],\n  \"artifact_hash\": \"abc123def456\",\n  \"touched_files\": [\"plan.md\"],\n  \"summary\": \"Reviewed and approved the plan\"\n}\n```"}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":300,"output_tokens":200}}
