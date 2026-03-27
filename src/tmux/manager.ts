@@ -20,36 +20,45 @@ export function isInsideTmux(): boolean {
 }
 
 export function createDuckSession(sessionName: string, layout: 'horizontal' | 'vertical'): TmuxSession {
-  // Create session with first pane (will become claude pane)
+  // Create session — this gives us one pane
   execSync(`tmux new-session -d -s "${sessionName}" -x 220 -y 60`, { stdio: 'pipe' })
 
-  // Name the first pane
-  execSync(`tmux select-pane -t "${sessionName}:0.0" -T "Claude (Agent A)"`, { stdio: 'pipe' })
+  // Get the initial pane ID
+  const initialPanes = listPanes(sessionName)
+  const firstPane = initialPanes[0]
 
   if (layout === 'horizontal') {
-    // Split right for codex
-    execSync(`tmux split-window -h -t "${sessionName}:0.0"`, { stdio: 'pipe' })
-    execSync(`tmux select-pane -t "${sessionName}:0.1" -T "Codex (Agent B)"`, { stdio: 'pipe' })
-    // Split bottom of left pane for control
-    execSync(`tmux split-window -v -t "${sessionName}:0.0" -l 12`, { stdio: 'pipe' })
-    execSync(`tmux select-pane -t "${sessionName}:0.1" -T "Duck Control"`, { stdio: 'pipe' })
+    // Split right for codex pane
+    execSync(`tmux split-window -h -t "${firstPane}"`, { stdio: 'pipe' })
+    // Split bottom of left (first) pane for control
+    execSync(`tmux split-window -v -t "${firstPane}" -l 12`, { stdio: 'pipe' })
   } else {
-    // Split bottom for codex
-    execSync(`tmux split-window -v -t "${sessionName}:0.0"`, { stdio: 'pipe' })
-    execSync(`tmux select-pane -t "${sessionName}:0.1" -T "Codex (Agent B)"`, { stdio: 'pipe' })
+    // Split bottom for codex pane
+    execSync(`tmux split-window -v -t "${firstPane}"`, { stdio: 'pipe' })
     // Split bottom again for control
-    execSync(`tmux split-window -v -t "${sessionName}:0.1" -l 12`, { stdio: 'pipe' })
-    execSync(`tmux select-pane -t "${sessionName}:0.2" -T "Duck Control"`, { stdio: 'pipe' })
+    const midPanes = listPanes(sessionName)
+    execSync(`tmux split-window -v -t "${midPanes[1]}" -l 12`, { stdio: 'pipe' })
   }
 
+  // Get final pane IDs after all splits
   const panes = listPanes(sessionName)
+  // horizontal layout: split-h creates pane to the right, split-v on first creates pane below first
+  // panes[0] = top-left (claude), panes[1] = bottom-left (control), panes[2] = right (codex)
+  const claudePane = panes[0]
+  const codexPane = layout === 'horizontal' ? panes[2] : panes[1]
+  const controlPane = layout === 'horizontal' ? panes[1] : panes[2]
+
+  // Set pane titles using actual pane IDs
+  setPaneTitle(claudePane, 'Claude (Agent A)')
+  setPaneTitle(codexPane, 'Codex (Agent B)')
+  setPaneTitle(controlPane, 'Duck Control')
 
   return {
     name: sessionName,
     panes: {
-      claude: panes[0] ?? '%0',
-      codex: layout === 'horizontal' ? (panes[2] ?? '%2') : (panes[1] ?? '%1'),
-      control: layout === 'horizontal' ? (panes[1] ?? '%1') : (panes[2] ?? '%2'),
+      claude: claudePane,
+      codex: codexPane,
+      control: controlPane,
     },
   }
 }
